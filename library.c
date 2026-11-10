@@ -320,15 +320,29 @@ typedef struct {
     lib_t *l;
     const lib_t *prev;
     lib_progress_fn progress;
+    lib_live_fn live;
     void *user;
     int files, cap, plcap;
+    bool stopped;
 } scan_t;
+
+/* Whether to make another file call. */
+static bool go(scan_t *sc)
+{
+    if (!sc->stopped && sc->live && !sc->live(sc->user)) sc->stopped = true;
+    return !sc->stopped;
+}
+
+typedef struct {
+    FILE *f;
+    scan_t *sc;
+} fsrc_t;
 
 static size_t f_read(void *ctx, uint32_t off, void *buf, size_t n)
 {
-    FILE *f = ctx;
-    if (fseek(f, (long)off, SEEK_SET)) return 0;
-    return fread(buf, 1, n, f);
+    fsrc_t *s = ctx;
+    if (!go(s->sc) || fseek(s->f, (long)off, SEEK_SET)) return 0;
+    return fread(buf, 1, n, s->f);
 }
 
 static void add_track(scan_t *sc, const char *path, const struct stat *st)
@@ -356,11 +370,13 @@ static void add_track(scan_t *sc, const char *path, const struct stat *st)
         t->album_artist = ar_str(l, o->album_artist);
         t->genre = ar_str(l, o->genre);
     } else {
-        FILE *f = fopen(path, "rb");
+        FILE *f = go(sc) ? fopen(path, "rb") : NULL;
         if (!f) return;
-        tag_src_t src = { f_read, f, size };
+        fsrc_t fs = { f, sc };
+        tag_src_t src = { f_read, &fs, size };
         tags_t tg;
         bool ok = tags_read(&src, &tg);
+        if (!go(sc)) return;                                /* the OS closes it */
         fclose(f);
         if (!ok) return;
         if (!tg.title[0]) {
@@ -389,22 +405,22 @@ static void add_track(scan_t *sc, const char *path, const struct stat *st)
 }
 
 /* Entries in a playlist: its lines that aren't blank or comments. */
-static int count_entries(const char *path)
+static int count_entries(scan_t *sc, const char *path)
 {
-    FILE *f = fopen(path, "rb");
+    FILE *f = go(sc) ? fopen(path, "rb") : NULL;
     if (!f) return 0;
     char line[M3U_PATH_MAX];
     int n = 0;
-    while (fgets(line, sizeof line, f)) {
+    while (go(sc) && fgets(line, sizeof line, f)) {
         const char *p = line;
         while (*p == ' ' || *p == '\t' || (unsigned char)*p == 0xef || (unsigned char)*p == 0xbb || (unsigned char)*p == 0xbf) p++;
         if (*p && *p != '#' && *p != '\r' && *p != '\n') n++;
     }
-    fclose(f);
+    if (go(sc)) fclose(f);                                  /* stopped: the OS closes it */
     return n;
 }
 
-static void add_playlist(lib_t *l, int *cap, const char *path, const char *name)
+static void add_playlist(scan_t *sc, lib_t *l, int *cap, const char *path, const char *name)
 {
     if (l->npl == *cap) {
         int c = *cap ? *cap * 2 : 16;
@@ -418,16 +434,16 @@ static void add_playlist(lib_t *l, int *cap, const char *path, const char *name)
     tag_copy(n, sizeof n, name, dot ? (size_t)(dot - name) : strlen(name));
     l->pl[l->npl].path = ar_str(l, path);
     l->pl[l->npl].name = ar_str(l, n);
-    l->pl[l->npl].n = count_entries(path);
+    l->pl[l->npl].n = count_entries(sc, path);
     l->npl++;
 }
 
 static void walk(scan_t *sc, char *path, size_t len, int depth)
 {
-    DIR *d = opendir(path);
+    DIR *d = go(sc) ? opendir(path) : NULL;
     if (!d) return;
     struct dirent *e;
-    while ((e = readdir(d))) {
+    while (go(sc) && (e = readdir(d))) {
         const char *name = e->d_name;
         if (name[0] == '.') continue;                       /* hidden, and macOS "._" files */
         size_t nl = strlen(name);
@@ -441,18 +457,18 @@ static void walk(scan_t *sc, char *path, size_t len, int depth)
         else if (e->d_type == DT_REG) is_dir = false;
         else
 #endif
-            is_dir = stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+            is_dir = go(sc) && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
         if (is_dir) {
             if (depth < MAX_DEPTH) walk(sc, path, len + 1 + nl, depth + 1);
         } else if (ext_is(name, ".mp3") || ext_is(name, ".flac") || ext_is(name, ".wav")) {
-            if (stat(path, &st) == 0) add_track(sc, path, &st);
+            if (go(sc) && stat(path, &st) == 0) add_track(sc, path, &st);
             if (++sc->files % 8 == 0 && sc->progress) sc->progress(sc->files, sc->user);
         } else if (ext_is(name, ".m3u") || ext_is(name, ".m3u8")) {
-            add_playlist(sc->l, &sc->plcap, path, name);
+            add_playlist(sc, sc->l, &sc->plcap, path, name);
         }
         path[len] = 0;
     }
-    closedir(d);
+    if (go(sc)) closedir(d);                                /* stopped: the OS closes it */
 }
 
 static int cmp_pl(const lib_t *l, int a, int b)
@@ -474,15 +490,15 @@ static void sort_playlists(lib_t *l)
     free(s);
 }
 
-lib_t *lib_scan(const lib_t *prev, lib_progress_fn progress, void *user)
+lib_t *lib_scan(const lib_t *prev, lib_progress_fn progress, lib_live_fn live, void *user)
 {
     lib_t *l = lib_new();
     if (!l) return NULL;
-    scan_t sc = { .l = l, .prev = prev, .progress = progress, .user = user };
+    scan_t sc = { .l = l, .prev = prev, .progress = progress, .live = live, .user = user };
     char path[M3U_PATH_MAX] = MUSIC_DIR;
     walk(&sc, path, strlen(path), 0);
     sort_playlists(l);
-    if (!build_index(l)) {
+    if (sc.stopped || !build_index(l)) {
         lib_free(l);
         return NULL;
     }
@@ -497,6 +513,7 @@ void lib_rescan_playlists(lib_t *l)
     }
     l->npl = keep;
     int cap = keep;
+    scan_t sc = { .l = l };                                 /* runs on the UI task: never stops */
     DIR *d = opendir(PLAYLIST_DIR);
     if (d) {
         struct dirent *e;
@@ -507,7 +524,7 @@ void lib_rescan_playlists(lib_t *l)
             if (dl + 1 + nl >= sizeof p) continue;          /* too long a name to be one of ours */
             memcpy(p, PLAYLIST_DIR "/", dl + 1);
             memcpy(p + dl + 1, e->d_name, nl + 1);
-            add_playlist(l, &cap, p, e->d_name);
+            add_playlist(&sc, l, &cap, p, e->d_name);
         }
         closedir(d);
     }

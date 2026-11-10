@@ -64,11 +64,16 @@ struct lib {
 };
 
 typedef void (*lib_progress_fn)(int files, void *user);
+typedef bool (*lib_live_fn)(void *user);
 
 /* The cached index (no file checks): NULL if there is none. */
 lib_t *lib_load_cache(const char *file);
-/* Walk /sd/music. prev (may be NULL) supplies tags for unchanged files. */
-lib_t *lib_scan(const lib_t *prev, lib_progress_fn progress, void *user);
+/* Walk /sd/music. prev (may be NULL) supplies tags for unchanged files.
+ * live (may be NULL) is asked before each file call; once it returns false
+ * the scan gives up and returns NULL, leaving what it had open to the OS (it
+ * closes an app's files and folders when the app ends): an exiting app's task
+ * that enters a file call is parked by the OS until it deletes it. */
+lib_t *lib_scan(const lib_t *prev, lib_progress_fn progress, lib_live_fn live, void *user);
 /* Write the index (UI task: /data is internal flash). */
 bool lib_save_cache(const lib_t *l, const char *file);
 void lib_free(lib_t *l);

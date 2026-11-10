@@ -15,9 +15,10 @@
 static struct {
     t5_app_t *app;
     t5_mutex_t mx;
-    volatile bool run, done;
+    volatile bool run;
     t5_media_session_t *session;
     bool session_failed;
+    bool session_toast;            /* to show, outside mx (a toast takes the UI lock) */
     /* the queue */
     char **paths;
     int n, cap;
@@ -42,6 +43,15 @@ static struct {
 
 static void lock(void) { t5_mutex_lock(s.mx); }
 static void unlock(void) { t5_mutex_unlock(s.mx); }
+
+/* False once player_stop ran or the app is exiting. The task checks it before
+ * each step that touches a file: once the app is exiting, the OS parks a task
+ * that enters a file call until it deletes it, so the task would never get
+ * back here to end by itself. */
+static bool live(void)
+{
+    return s.run && t5_app_running(s.app);
+}
 
 /* ---- the queue (s.mx held) ------------------------------------------------------- */
 static void shuffle_from(int from)
@@ -90,7 +100,7 @@ static void session_open(void)
     if (t5_media_session_open(&s.session) != T5_OK) {
         s.session = NULL;
         s.session_failed = true;
-        T5_IGNORE(t5_shell_toast("Another app is playing audio"));
+        s.session_toast = true;
     }
 }
 
@@ -128,18 +138,18 @@ typedef struct {
 static size_t file_read(void *ctx, uint32_t off, void *buf, size_t n)
 {
     FILE *f = ctx;
-    if (fseek(f, (long)off, SEEK_SET)) return 0;
+    if (!live() || fseek(f, (long)off, SEEK_SET)) return 0;
     return fread(buf, 1, n, f);
 }
 
 static bool read_tags(const char *path, tags_t *t)
 {
-    FILE *f = fopen(path, "rb");
+    FILE *f = live() ? fopen(path, "rb") : NULL;
     if (!f) return false;
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
+    long size = live() && fseek(f, 0, SEEK_END) == 0 ? ftell(f) : -1;
     tag_src_t src = { file_read, f, size > 0 ? (uint32_t)size : 0 };
-    bool ok = tags_read(&src, t);
+    bool ok = live() && tags_read(&src, t);
+    if (!live()) return false;                         /* exiting: the OS closes it */
     fclose(f);
     if (ok && !t->title[0]) {                          /* the file name, without the extension */
         const char *b = strrchr(path, '/');
@@ -185,10 +195,10 @@ static bool load(eng_t *e, bool keep_stream)
     dec_close(e->dec);
     e->dec = NULL;
     if (!keep_stream) close_out(e);
-    if (!any) return false;
+    if (!any || !live()) return false;
     tags_t t;
-    if (!read_tags(path, &t) || !(e->dec = dec_open(path, &t))) return false;
-    if (start) dec_seek(e->dec, start);
+    if (!read_tags(path, &t) || !live() || !(e->dec = dec_open(path, &t))) return false;
+    if (start && live()) dec_seek(e->dec, start);
     lock();
     snprintf(s.path, sizeof s.path, "%s", path);
     s.tags = t;
@@ -233,7 +243,7 @@ static void task(void *arg)
     eng_t e = { 0 };
     e.pcm = malloc(CHUNK * 2 * sizeof(int16_t));
     int failures = 0;
-    while (s.run && t5_app_running(s.app) && e.pcm) {
+    while (live() && e.pcm) {
         t5_media_cmd_t mc;
         if (s.session && t5_media_session_next(s.session, &mc, 0) == T5_OK) media_command(&mc);
 
@@ -241,10 +251,15 @@ static void task(void *arg)
         bool want_load = s.want_load, want_seek = s.want_seek, want_play = s.want_play;
         uint32_t seek_ms = s.seek_ms;
         s.want_load = s.want_seek = false;
+        bool session_toast = s.session_toast;
+        s.session_toast = false;
         unlock();
+        if (session_toast) T5_IGNORE(t5_shell_toast("Another app is playing audio"));
 
         if (want_load) {
-            if (load(&e, false)) failures = 0;
+            bool ok = load(&e, false);
+            if (!live()) break;
+            if (ok) failures = 0;
             else if (s.n && ++failures < s.n) {            /* skip what won't open */
                 lock();
                 int nx = after_end();
@@ -252,13 +267,13 @@ static void task(void *arg)
                 if (nx >= 0) s.cur = nx, s.want_load = true;
                 changed();
                 unlock();
-                if (nx < 0) T5_IGNORE(t5_shell_toast("Couldn't play that track"));
+                if (nx < 0 && live()) T5_IGNORE(t5_shell_toast("Couldn't play that track"));
                 continue;
-            } else {
+            } else if (live()) {
                 T5_IGNORE(t5_shell_toast("Couldn't play those tracks"));
             }
         }
-        if (want_seek && e.dec) {
+        if (want_seek && e.dec && live()) {
             if (dec_seek(e.dec, seek_ms)) close_out(&e);    /* drop what's queued from before */
             lock();
             s.pos_ms = seek_ms;
@@ -279,6 +294,7 @@ static void task(void *arg)
             continue;
         }
         if (!open_out(&e)) {
+            if (!live()) break;
             T5_IGNORE(t5_shell_toast("Audio output is busy"));
             lock();
             s.want_play = false;
@@ -298,6 +314,7 @@ static void task(void *arg)
         unlock();
 
         if (e.at == e.have) {
+            if (!live()) break;
             int n = dec_read(e.dec, e.pcm, CHUNK);
             if (n <= 0) {                                    /* the end: on to the next */
                 lock();
@@ -312,7 +329,10 @@ static void task(void *arg)
                         unlock();
                     }
                 } else {
-                    T5_IGNORE(t5_audio_out_drain(e.out, STREAM_MS + 500));
+                    /* let the last of it play, in slices so an exit isn't held up */
+                    for (int ms = 0; ms < STREAM_MS + 500 && live() && t5_audio_out_queued_ms(e.out); ms += 20) {
+                        t5_delay_ms(20);
+                    }
                     close_out(&e);
                     lock();
                     s.cur = s.n ? 0 : -1;
@@ -335,9 +355,8 @@ static void task(void *arg)
         unlock();
     }
     close_out(&e);
-    dec_close(e.dec);
+    dec_close(e.dec);                                  /* exiting: leaves the file to the OS */
     free(e.pcm);
-    s.done = true;
 }
 
 /* ---- API --------------------------------------------------------------------------- */
@@ -347,14 +366,14 @@ bool player_start(t5_app_t *app)
     s.mx = t5_mutex_create();
     s.cur = -1;
     s.run = true;
+    dec_set_live(live);
     srand((unsigned)t5_time_us());
     return s.mx && t5_task_create("music.play", task, NULL, TASK_STACK, 5, T5_CORE_ANY, NULL) == T5_OK;
 }
 
 void player_stop(void)
 {
-    s.run = false;
-    for (int i = 0; i < 100 && !s.done; i++) t5_delay_ms(10);
+    s.run = false;          /* no wait: the task ends by itself (player.h) */
 }
 
 void player_set_queue(const char *const *paths, int n, int start, bool shuffle)

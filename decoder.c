@@ -64,6 +64,18 @@ struct dec {
     t5_audio_dec_t *wav;
 };
 
+static bool (*s_live)(void);
+
+void dec_set_live(bool (*live)(void))
+{
+    s_live = live;
+}
+
+static bool io_ok(void)
+{
+    return !s_live || s_live();
+}
+
 /* ---- MP3 ------------------------------------------------------------------------- */
 static void mp3_fill(dec_t *d)
 {
@@ -72,6 +84,7 @@ static void mp3_fill(dec_t *d)
         d->blen -= d->bat;
         d->bat = 0;
     }
+    if (!io_ok()) return;
     long here = ftell(d->f);
     size_t want = MP3_BUF - d->blen;
     if (here >= 0 && (uint32_t)here + want > d->audio_end) want = here < (long)d->audio_end ? d->audio_end - (uint32_t)here : 0;
@@ -89,6 +102,7 @@ static bool mp3_frame(dec_t *d)
         int16_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
         int n = mp3dec_decode_frame(d->mp3, d->buf + d->bat, (int)(d->blen - d->bat), pcm, &fi);
         if (!fi.frame_bytes) {                         /* no frame in what we have */
+            if (!io_ok()) return false;
             long here = ftell(d->f);
             if (feof(d->f) || here < 0 || (uint32_t)here >= d->audio_end) return false;
             size_t keep = d->blen - d->bat > 3 ? 3 : d->blen - d->bat;   /* a header may straddle */
@@ -112,7 +126,7 @@ static bool mp3_frame(dec_t *d)
 static void mp3_read_toc(dec_t *d)
 {
     uint8_t b[192];
-    if (fseek(d->f, (long)d->audio_off, SEEK_SET) || fread(b, 1, sizeof b, d->f) < sizeof b) return;
+    if (!io_ok() || fseek(d->f, (long)d->audio_off, SEEK_SET) || fread(b, 1, sizeof b, d->f) < sizeof b) return;
     for (size_t x = 4; x + 120 <= sizeof b; x++) {
         if (memcmp(b + x, "Xing", 4) && memcmp(b + x, "Info", 4)) continue;
         uint32_t flags = (uint32_t)b[x + 4] << 24 | (uint32_t)b[x + 5] << 16 | (uint32_t)b[x + 6] << 8 | b[x + 7];
@@ -136,7 +150,7 @@ static bool mp3_open(dec_t *d, const tags_t *t)
     d->src_rate = t->rate;
     d->src_ch = t->channels == 1 ? 1 : 2;
     mp3_read_toc(d);
-    return fseek(d->f, (long)d->audio_off, SEEK_SET) == 0;
+    return io_ok() && fseek(d->f, (long)d->audio_off, SEEK_SET) == 0;
 }
 
 static bool mp3_seek(dec_t *d, uint32_t ms)
@@ -153,7 +167,7 @@ static bool mp3_seek(dec_t *d, uint32_t ms)
     } else {
         off = (uint32_t)((uint64_t)span * ms / d->duration_ms);
     }
-    if (fseek(d->f, (long)(d->audio_off + off), SEEK_SET)) return false;
+    if (!io_ok() || fseek(d->f, (long)(d->audio_off + off), SEEK_SET)) return false;
     mp3dec_init(d->mp3);
     d->blen = d->bat = 0;
     return true;
@@ -162,17 +176,20 @@ static bool mp3_seek(dec_t *d, uint32_t ms)
 /* ---- FLAC ------------------------------------------------------------------------ */
 static size_t fl_read(void *u, void *buf, size_t n)
 {
+    if (!io_ok()) return 0;
     return fread(buf, 1, n, ((dec_t *)u)->f);
 }
 
 static drflac_bool32 fl_seek(void *u, int off, drflac_seek_origin o)
 {
+    if (!io_ok()) return DRFLAC_FALSE;
     int w = o == DRFLAC_SEEK_SET ? SEEK_SET : o == DRFLAC_SEEK_CUR ? SEEK_CUR : SEEK_END;
     return fseek(((dec_t *)u)->f, off, w) == 0;
 }
 
 static drflac_bool32 fl_tell(void *u, drflac_int64 *at)
 {
+    if (!io_ok()) return DRFLAC_FALSE;
     long p = ftell(((dec_t *)u)->f);
     if (p < 0) return DRFLAC_FALSE;
     *at = p;
@@ -196,6 +213,7 @@ static bool flac_frames(dec_t *d)
 /* ---- WAV ------------------------------------------------------------------------- */
 static bool wav_frames(dec_t *d)
 {
+    if (!io_ok()) return false;
     int n = t5_audio_dec_read(d->wav, d->pend, SRC_FRAMES);
     if (n <= 0) return false;
     d->npend = (size_t)n;
@@ -211,7 +229,9 @@ dec_t *dec_open(const char *path, const tags_t *t)
     d->fmt = t->fmt;
     d->duration_ms = t->duration_ms;
     bool ok = false;
-    if (t->fmt == TRACK_WAV) {
+    if (!io_ok()) {
+        /* exiting: open nothing */
+    } else if (t->fmt == TRACK_WAV) {
         t5_audio_info_t in;
         if (t5_audio_dec_open(path, &d->wav) == T5_OK && t5_audio_dec_info(d->wav, &in) == T5_OK) {
             d->src_rate = in.rate;
@@ -287,8 +307,8 @@ bool dec_seek(dec_t *d, uint32_t ms)
     bool ok;
     switch (d->fmt) {
     case TRACK_MP3: ok = mp3_seek(d, ms); break;
-    case TRACK_FLAC: ok = drflac_seek_to_pcm_frame(d->flac, (drflac_uint64)ms * d->src_rate / 1000); break;
-    case TRACK_WAV: ok = t5_audio_dec_seek(d->wav, ms) == T5_OK; break;
+    case TRACK_FLAC: ok = io_ok() && drflac_seek_to_pcm_frame(d->flac, (drflac_uint64)ms * d->src_rate / 1000); break;
+    case TRACK_WAV: ok = io_ok() && t5_audio_dec_seek(d->wav, ms) == T5_OK; break;
     default: ok = false; break;
     }
     if (ok) {
@@ -306,9 +326,11 @@ uint32_t dec_pos_ms(const dec_t *d)
 void dec_close(dec_t *d)
 {
     if (!d) return;
-    if (d->flac) drflac_close(d->flac);
-    if (d->wav) T5_IGNORE(t5_audio_dec_close(d->wav));
-    if (d->f) fclose(d->f);
+    if (d->flac) drflac_close(d->flac);                 /* frees; no file calls (DR_FLAC_NO_STDIO) */
+    if (io_ok()) {
+        if (d->wav) T5_IGNORE(t5_audio_dec_close(d->wav));
+        if (d->f) fclose(d->f);
+    }
     free(d->mp3);
     free(d->buf);
     free(d->fbuf);

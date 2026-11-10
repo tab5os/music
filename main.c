@@ -46,6 +46,7 @@
 #define THUMBS_MAX 64
 #define DECOS 192
 #define SAVE_EVERY_MS 10000
+#define FRESH_SAVE_MS 500          /* on_destroy: on_suspend's save is still current */
 
 typedef enum { V_SONGS, V_ALBUMS, V_ARTISTS, V_PLAYLISTS, V_TRACKS, V_QUEUE } vkind_t;
 
@@ -1698,7 +1699,14 @@ static void scan_progress_ui(void *arg)
 static void scan_progress(int files, void *user)
 {
     (void)user;
-    T5_IGNORE(t5_ui_async(scan_progress_ui, (void *)(intptr_t)files));   /* a dropped update is fine */
+    /* t5_ui_async takes the UI lock, which the UI task holds through exit */
+    if (t5_app_running(ui.app)) T5_IGNORE(t5_ui_async(scan_progress_ui, (void *)(intptr_t)files));   /* a dropped update is fine */
+}
+
+static bool scan_live(void *user)
+{
+    (void)user;
+    return t5_app_running(ui.app);
 }
 
 static void scan_task(void *arg)
@@ -1706,8 +1714,8 @@ static void scan_task(void *arg)
     const lib_t *prev = arg;
     scan_done_t *d = malloc(sizeof *d);
     if (!d) return;
-    d->lib = lib_scan(prev, scan_progress, NULL);
-    if (t5_ui_async(scan_finished, d) != T5_OK) {
+    d->lib = lib_scan(prev, scan_progress, scan_live, NULL);
+    if (!t5_app_running(ui.app) || t5_ui_async(scan_finished, d) != T5_OK) {
         lib_free(d->lib);
         free(d);
     }
@@ -1884,7 +1892,7 @@ static void on_create(t5_app_t *app)
 {
     ui.app = app;
     snprintf(ui.data, sizeof ui.data, "%s", t5_app_data_dir(app));
-    art_start();
+    art_start(app);
     if (!player_start(app)) toast("Couldn't start the player");
     load_state();
 
@@ -1938,12 +1946,15 @@ static void on_suspend(t5_app_t *app)
     save_state();
 }
 
+/* Quick, on the UI task: the workers are told to stop and not waited for
+ * (they end by themselves, and the OS frees what they use after this
+ * returns), and the state is saved only if on_suspend didn't just do it. */
 static void on_destroy(t5_app_t *app)
 {
     (void)app;
-    save_state();
     player_stop();
     art_stop();
+    if (t5_time_ms() - ui.last_save > FRESH_SAVE_MS) save_state();
 }
 
 static void on_rotate(t5_app_t *app, int degrees)

@@ -8,11 +8,16 @@
  * free with art_free. Progressive JPEGs aren't supported by TJpgDec: no art. */
 #pragma once
 #include <stdint.h>
+#include <t5/app.h>
 #include "lvgl.h"
 
 typedef void (*art_done_fn)(uint32_t key, lv_image_dsc_t *img, void *user);   /* img NULL: none */
 
-void art_start(void);
+void art_start(t5_app_t *app);
+/* Asks the task to stop and returns at once: the task checks between steps
+ * and ends by itself, and the OS reclaims it and its memory after on_destroy.
+ * Waiting here would block the UI task, and an exiting app's task that
+ * enters a file call is parked by the OS for good, so it might never end. */
 void art_stop(void);
 /* key: the caller's (an album, a track); a pending request with the same key
  * and size is replaced. */
