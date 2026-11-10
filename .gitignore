@@ -1,0 +1,6 @@
+build/
+test/build/
+*.t5app
+*.elf
+*.map
+__pycache__/
