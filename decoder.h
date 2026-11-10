@@ -20,4 +20,10 @@ int dec_read(dec_t *d, int16_t *pcm, size_t frames);
  * for constant bitrate; it lands within a frame). */
 bool dec_seek(dec_t *d, uint32_t ms);
 uint32_t dec_pos_ms(const dec_t *d);        /* how far decoding has got */
+/* Leaves the file to the OS (it closes an app's files when the app ends)
+ * while the live hook says no. */
 void dec_close(dec_t *d);
+/* Checked before each file call: once it returns false, reads and seeks
+ * fail at once. The player passes "still running": an exiting app's task
+ * that enters a file call is parked by the OS until it deletes it. */
+void dec_set_live(bool (*live)(void));

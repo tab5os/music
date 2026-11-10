@@ -29,6 +29,8 @@ typedef struct {
 } player_state_t;
 
 bool player_start(t5_app_t *app);
+/* Asks the task to stop and returns at once; it also stops by itself once the
+ * app is exiting. The OS reclaims the task and its memory after on_destroy. */
 void player_stop(void);
 
 /* Replace the queue with n paths and play from start (in that order; with

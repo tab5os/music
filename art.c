@@ -28,11 +28,19 @@ typedef struct {
 } req_t;
 
 static struct {
+    t5_app_t *app;
     t5_mutex_t mx;
     req_t q[PENDING_MAX];
     uint32_t seq;
-    volatile bool run, done;
+    volatile bool run;
 } s;
+
+/* False once art_stop ran or the app is exiting: checked before each file
+ * call, since the OS parks an exiting app's task that enters one. */
+static bool live(void)
+{
+    return s.run && t5_app_running(s.app);
+}
 
 /* ---- decoding ----------------------------------------------------------------------- */
 typedef struct {
@@ -54,6 +62,7 @@ static size_t j_in(JDEC *jd, uint8_t *buf, size_t n)
 static int j_out(JDEC *jd, void *bitmap, JRECT *r)
 {
     jctx_t *c = jd->device;
+    if (!live()) return 0;                             /* stops jd_decomp */
     const uint8_t *p = bitmap;                         /* B, G, R */
     for (unsigned y = r->top; y <= r->bottom; y++) {
         for (unsigned x = r->left; x <= r->right; x++, p += 3) {
@@ -67,12 +76,12 @@ static int j_out(JDEC *jd, void *bitmap, JRECT *r)
 
 static uint8_t *read_range(const char *path, uint32_t off, uint32_t len)
 {
-    if (!len || len > JPEG_MAX) return NULL;
+    if (!len || len > JPEG_MAX || !live()) return NULL;
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
     uint8_t *b = malloc(len);
-    bool ok = b && fseek(f, (long)off, SEEK_SET) == 0 && fread(b, 1, len, f) == len;
-    fclose(f);
+    bool ok = b && live() && fseek(f, (long)off, SEEK_SET) == 0 && live() && fread(b, 1, len, f) == len;
+    if (live()) fclose(f);                             /* exiting: the OS closes it */
     if (!ok) {
         free(b);
         return NULL;
@@ -87,13 +96,13 @@ static uint8_t *folder_cover(const char *track, uint32_t *len)
                                          "folder.jpeg" };
     const char *slash = strrchr(track, '/');
     if (!slash) return NULL;
-    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+    for (size_t i = 0; i < sizeof names / sizeof names[0] && live(); i++) {
         char p[M3U_PATH_MAX + 16];
         snprintf(p, sizeof p, "%.*s/%s", (int)(slash - track), track, names[i]);
         FILE *f = fopen(p, "rb");
         if (!f) continue;
-        fseek(f, 0, SEEK_END);
-        long n = ftell(f);
+        long n = live() && fseek(f, 0, SEEK_END) == 0 && live() ? ftell(f) : -1;
+        if (!live()) return NULL;                      /* exiting: the OS closes it */
         fclose(f);
         if (n <= 0 || n > JPEG_MAX) continue;
         uint8_t *b = read_range(p, 0, (uint32_t)n);
@@ -148,6 +157,14 @@ static lv_image_dsc_t *decode(const uint8_t *jpg, size_t len, int px)
     return img;
 }
 
+/* An image the UI never saw (no image cache entry to drop). */
+static void art_free_data(lv_image_dsc_t *img)
+{
+    if (!img) return;
+    free((void *)img->data);
+    free(img);
+}
+
 /* ---- the task ------------------------------------------------------------------------ */
 typedef struct {
     art_done_fn fn;
@@ -159,7 +176,7 @@ typedef struct {
 static void deliver(void *arg)
 {
     done_t *d = arg;
-    if (s.run) d->fn(d->key, d->img, d->user);
+    if (live()) d->fn(d->key, d->img, d->user);
     else art_free(d->img);
     free(d);
 }
@@ -167,7 +184,7 @@ static void deliver(void *arg)
 static void task(void *arg)
 {
     (void)arg;
-    while (s.run) {
+    while (live()) {
         req_t r = { 0 };
         t5_mutex_lock(s.mx);
         int best = -1;
@@ -186,26 +203,29 @@ static void task(void *arg)
         uint32_t len = r.len;
         uint8_t *jpg = r.len ? read_range(r.path, r.off, r.len) : NULL;
         if (!jpg) jpg = folder_cover(r.path, &len);
-        lv_image_dsc_t *img = jpg ? decode(jpg, len, r.px) : NULL;
+        lv_image_dsc_t *img = jpg && live() ? decode(jpg, len, r.px) : NULL;
         free(jpg);
+        if (!live()) {                                 /* nobody to give it to */
+            art_free_data(img);
+            break;
+        }
         done_t *d = malloc(sizeof *d);
         if (!d) {
-            free(img ? (void *)img->data : NULL);
-            free(img);
+            art_free_data(img);
             continue;
         }
         *d = (done_t){ r.fn, r.user, r.key, img };
-        if (t5_ui_async(deliver, d) != T5_OK) {
-            free(img ? (void *)img->data : NULL);
-            free(img);
+        /* t5_ui_async takes the UI lock, which the UI task holds through exit */
+        if (!live() || t5_ui_async(deliver, d) != T5_OK) {
+            art_free_data(img);
             free(d);
         }
     }
-    s.done = true;
 }
 
-void art_start(void)
+void art_start(t5_app_t *app)
 {
+    s.app = app;
     s.mx = t5_mutex_create();
     s.run = true;
     if (!s.mx || t5_task_create("music.art", task, NULL, 16 * 1024, 3, T5_CORE_ANY, NULL) != T5_OK) s.run = false;
@@ -214,7 +234,6 @@ void art_start(void)
 void art_stop(void)
 {
     s.run = false;
-    for (int i = 0; i < 100 && !s.done; i++) t5_delay_ms(10);
 }
 
 void art_request(uint32_t key, const char *track_path, uint32_t art_off, uint32_t art_len, int px, art_done_fn fn,
