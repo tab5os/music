@@ -4,3 +4,5 @@ test/build/
 *.elf
 *.map
 __pycache__/
+.t5sdk/
+*.pem
