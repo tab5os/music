@@ -8,7 +8,10 @@
 #include "decoder.h"
 
 #define CHUNK 1024                 /* frames per decode */
-#define STREAM_MS 400              /* the output stream's buffer */
+/* The output stream's buffer: enough to ride out a slow stretch of SD card
+ * reads (a big cover being read, a FLAC at 96 kHz and up, the next track
+ * opening). A seek or a skip closes the stream, so it adds no lag there. */
+#define STREAM_MS 1500
 #define PREV_RESTART_MS 3000
 #define TASK_STACK (48 * 1024)     /* minimp3 decodes on the stack */
 

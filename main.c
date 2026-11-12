@@ -1509,6 +1509,9 @@ static void np_build(void)
     lv_obj_t *col = lv_obj_create(body);
     lv_obj_remove_style_all(col);
     lv_obj_set_scrollable(col, false);
+    /* the slider's knob (and its pressed halo) stands out past the track's
+     * ends; let it draw into the body's padding instead of being cut off */
+    lv_obj_set_overflow_visible(col, true);
     if (ui.np.land) lv_obj_set_flex_grow(col, 1);
     lv_obj_set_width(col, ui.np.land ? LV_SIZE_CONTENT : LV_PCT(100));
     lv_obj_set_height(col, LV_SIZE_CONTENT);
@@ -1815,6 +1818,11 @@ static void mini_clicked(lv_event_t *e)
     open_np();
 }
 
+static void mini_resized(lv_event_t *e)
+{
+    lv_obj_set_width(ui.mini_bar, lv_obj_get_width(lv_event_get_target_obj(e)));
+}
+
 static void build_mini(lv_obj_t *root)
 {
     lv_obj_t *m = lv_obj_create(root);
@@ -1834,8 +1842,11 @@ static void build_mini(lv_obj_t *root)
     /* how far into the song, along the top edge */
     ui.mini_bar = lv_bar_create(m);
     lv_obj_set_floating(ui.mini_bar, true);
-    lv_obj_set_size(ui.mini_bar, LV_PCT(100), T5_DP(2));
+    /* edge to edge: a percentage would be of the content width, short of the
+     * right edge by the padding, so it follows the bar's full width instead */
+    lv_obj_set_size(ui.mini_bar, lv_obj_get_width(root), T5_DP(2));
     lv_obj_align(ui.mini_bar, LV_ALIGN_TOP_LEFT, -T5_DP(12), 0);
+    lv_obj_add_event_cb(m, mini_resized, LV_EVENT_SIZE_CHANGED, NULL);
     lv_obj_set_style_radius(ui.mini_bar, 0, 0);
     lv_obj_set_style_radius(ui.mini_bar, 0, LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(ui.mini_bar, md_color(sc()->c.on_surface), 0);
