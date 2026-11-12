@@ -1437,6 +1437,16 @@ static void slider_moved(lv_event_t *e)
     lv_label_set_text(ui.np.pos, t);
 }
 
+/* The slider's knob (and its pressed halo) stands out past the track's ends,
+ * and the slider is exactly as wide as its column. The column lets its
+ * children overflow, but only into its own box plus its extra draw margin,
+ * which is 0 by default, so the knob was cut in half at 0 and at the end.
+ * This margin goes on the column and the slider both. */
+static void slider_ext_draw(lv_event_t *e)
+{
+    lv_event_set_ext_draw_size(e, T5_DP(24));
+}
+
 static lv_obj_t *np_text(lv_obj_t *col, md_type_role_t role, lv_opa_t opa, lv_event_cb_t tap)
 {
     lv_obj_t *l = md_label_create(col, "", role);
@@ -1509,9 +1519,10 @@ static void np_build(void)
     lv_obj_t *col = lv_obj_create(body);
     lv_obj_remove_style_all(col);
     lv_obj_set_scrollable(col, false);
-    /* the slider's knob (and its pressed halo) stands out past the track's
-     * ends; let it draw into the body's padding instead of being cut off */
+    /* let the slider's knob draw into the body's padding (slider_ext_draw) */
     lv_obj_set_overflow_visible(col, true);
+    lv_obj_add_event_cb(col, slider_ext_draw, LV_EVENT_REFR_EXT_DRAW_SIZE, NULL);
+    lv_obj_refresh_ext_draw_size(col);
     if (ui.np.land) lv_obj_set_flex_grow(col, 1);
     lv_obj_set_width(col, ui.np.land ? LV_SIZE_CONTENT : LV_PCT(100));
     lv_obj_set_height(col, LV_SIZE_CONTENT);
@@ -1528,6 +1539,8 @@ static void np_build(void)
     lv_obj_set_style_margin_top(ui.np.slider, T5_DP(20), 0);
     lv_obj_add_event_cb(ui.np.slider, slider_released, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(ui.np.slider, slider_moved, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(ui.np.slider, slider_ext_draw, LV_EVENT_REFR_EXT_DRAW_SIZE, NULL);
+    lv_obj_refresh_ext_draw_size(ui.np.slider);
     lv_obj_t *times = lv_obj_create(col);
     lv_obj_remove_style_all(times);
     lv_obj_set_size(times, LV_PCT(100), LV_SIZE_CONTENT);
