@@ -1811,6 +1811,18 @@ static lv_obj_t *tab_head(lv_obj_t *page)
     return row;
 }
 
+/* A button in a tab's head. Buttons join the OS's default focus group; when a
+ * focused button on a page over the tabs is deleted (the back arrow, Now
+ * playing's down arrow), LVGL hands focus to the one before it, which is the
+ * last of these, and focus scrolls an object into view: the tabs would slide
+ * to that tab. Taking focus must not move them. */
+static void tab_button(lv_obj_t *head, const char *text, lv_event_cb_t cb)
+{
+    lv_obj_t *b = md_button_create(head, text, MD_BUTTON_TEXT);
+    lv_obj_set_scroll_on_focus(b, false);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
+}
+
 static void add_notice(lv_obj_t *page, view_t *v)
 {
     v->notice = md_label_create(page, "", MD_TYPE_BODY1);
@@ -1934,8 +1946,8 @@ static void on_create(t5_app_t *app)
     ui.songs_count = md_label_create(head, "", MD_TYPE_BODY2);
     lv_obj_set_style_text_opa(ui.songs_count, sc()->on_surface.medium, 0);
     lv_obj_set_flex_grow(ui.songs_count, 1);
-    lv_obj_add_event_cb(md_button_create(head, "Shuffle", MD_BUTTON_TEXT), shuffle_all, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(md_button_create(head, "Rescan", MD_BUTTON_TEXT), rescan_clicked, LV_EVENT_CLICKED, NULL);
+    tab_button(head, "Shuffle", shuffle_all);
+    tab_button(head, "Rescan", rescan_clicked);
     make_list(p, &ui.songs, 0);
     add_notice(p, &ui.songs);
 
@@ -1952,7 +1964,7 @@ static void on_create(t5_app_t *app)
     lv_obj_t *spacer = lv_obj_create(head);
     lv_obj_remove_style_all(spacer);
     lv_obj_set_flex_grow(spacer, 1);
-    lv_obj_add_event_cb(md_button_create(head, "New playlist", MD_BUTTON_TEXT), new_playlist, LV_EVENT_CLICKED, NULL);
+    tab_button(head, "New playlist", new_playlist);
     make_list(p, &ui.playlists, 0);
     add_notice(p, &ui.playlists);
 
