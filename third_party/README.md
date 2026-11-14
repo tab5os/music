@@ -7,4 +7,4 @@
 | TJpgDec R0.03 | as bundled with LVGL 9.6 | ChaN's free license (in the source) | Album art JPEG decoding |
 | [Material Icons](https://github.com/google/material-design-icons) | the commit pinned in tab5os's `tools/assets/fonts.py` | Apache 2.0 | `../music_icons_*.c`: the player's icons the OS font leaves out, made by `../gen_fonts.py` |
 
-The OS image has no MP3, FLAC or JPEG decoder (it doesn't fit its size budget), so the app carries its own, as `docs/sdk.md` suggests. `tjpgd.c` and `tjpgd.h` are LVGL's copy with its `LV_USE_TJPGD` guard turned on and its LVGL includes replaced by `<stdint.h>`; `tjpgdcnf.h` is the app's own configuration.
+The OS image has no MP3, FLAC or JPEG decoder (it doesn't fit its size budget), so the app carries its own, as `docs/sdk.md` suggests. `tjpgd.c` and `tjpgd.h` are LVGL's copy with its `LV_USE_TJPGD` guard turned on and its LVGL includes replaced by `<stdint.h>`, and upstream's 1/8-scale output branch in `jd_mcu_output` put back (LVGL's copy drops it, which left 1/8-scaled images as garbage); `tjpgdcnf.h` is the app's own configuration.

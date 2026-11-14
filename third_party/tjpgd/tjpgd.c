@@ -889,6 +889,23 @@ JRESULT jd_mcu_output(
             }
         }
     }
+    else {    /* For only 1/8 scaling (each block's DC value is its one pixel); LVGL's copy dropped this branch */
+        pix = (uint8_t *)jd->workbuf;
+        pc = jd->mcubuf + mx * my;
+        cb = pc[0] - 128;       /* Get Cb/Cr component and remove offset */
+        cr = pc[64] - 128;
+        for(iy = 0; iy < my; iy += 8) {
+            py = jd->mcubuf;
+            if(iy == 8) py += 64 * 2;
+            for(ix = 0; ix < mx; ix += 8) {
+                yy = *py;       /* Get Y component */
+                py += 64;
+                *pix++ = /*B*/ BYTECLIP(yy + ((int)(1.772 * CVACC) * cb) / CVACC);
+                *pix++ = /*G*/ BYTECLIP(yy - ((int)(0.344 * CVACC) * cb + (int)(0.714 * CVACC) * cr) / CVACC);
+                *pix++ = /*R*/ BYTECLIP(yy + ((int)(1.402 * CVACC) * cr) / CVACC);
+            }
+        }
+    }
 
     /* Squeeze up pixel table if a part of MCU is to be truncated */
     mx >>= jd->scale;

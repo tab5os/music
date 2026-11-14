@@ -1437,6 +1437,16 @@ static void slider_moved(lv_event_t *e)
     lv_label_set_text(ui.np.pos, t);
 }
 
+/* The slider's knob (and its pressed halo) stands out past the track's ends,
+ * and the slider is exactly as wide as its column. The column lets its
+ * children overflow, but only into its own box plus its extra draw margin,
+ * which is 0 by default, so the knob was cut in half at 0 and at the end.
+ * This margin goes on the column and the slider both. */
+static void slider_ext_draw(lv_event_t *e)
+{
+    lv_event_set_ext_draw_size(e, T5_DP(24));
+}
+
 static lv_obj_t *np_text(lv_obj_t *col, md_type_role_t role, lv_opa_t opa, lv_event_cb_t tap)
 {
     lv_obj_t *l = md_label_create(col, "", role);
@@ -1509,6 +1519,10 @@ static void np_build(void)
     lv_obj_t *col = lv_obj_create(body);
     lv_obj_remove_style_all(col);
     lv_obj_set_scrollable(col, false);
+    /* let the slider's knob draw into the body's padding (slider_ext_draw) */
+    lv_obj_set_overflow_visible(col, true);
+    lv_obj_add_event_cb(col, slider_ext_draw, LV_EVENT_REFR_EXT_DRAW_SIZE, NULL);
+    lv_obj_refresh_ext_draw_size(col);
     if (ui.np.land) lv_obj_set_flex_grow(col, 1);
     lv_obj_set_width(col, ui.np.land ? LV_SIZE_CONTENT : LV_PCT(100));
     lv_obj_set_height(col, LV_SIZE_CONTENT);
@@ -1525,6 +1539,8 @@ static void np_build(void)
     lv_obj_set_style_margin_top(ui.np.slider, T5_DP(20), 0);
     lv_obj_add_event_cb(ui.np.slider, slider_released, LV_EVENT_RELEASED, NULL);
     lv_obj_add_event_cb(ui.np.slider, slider_moved, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(ui.np.slider, slider_ext_draw, LV_EVENT_REFR_EXT_DRAW_SIZE, NULL);
+    lv_obj_refresh_ext_draw_size(ui.np.slider);
     lv_obj_t *times = lv_obj_create(col);
     lv_obj_remove_style_all(times);
     lv_obj_set_size(times, LV_PCT(100), LV_SIZE_CONTENT);
@@ -1795,6 +1811,18 @@ static lv_obj_t *tab_head(lv_obj_t *page)
     return row;
 }
 
+/* A button in a tab's head. Buttons join the OS's default focus group; when a
+ * focused button on a page over the tabs is deleted (the back arrow, Now
+ * playing's down arrow), LVGL hands focus to the one before it, which is the
+ * last of these, and focus scrolls an object into view: the tabs would slide
+ * to that tab. Taking focus must not move them. */
+static void tab_button(lv_obj_t *head, const char *text, lv_event_cb_t cb)
+{
+    lv_obj_t *b = md_button_create(head, text, MD_BUTTON_TEXT);
+    lv_obj_set_scroll_on_focus(b, false);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, NULL);
+}
+
 static void add_notice(lv_obj_t *page, view_t *v)
 {
     v->notice = md_label_create(page, "", MD_TYPE_BODY1);
@@ -1813,6 +1841,11 @@ static void mini_clicked(lv_event_t *e)
 {
     (void)e;
     open_np();
+}
+
+static void mini_resized(lv_event_t *e)
+{
+    lv_obj_set_width(ui.mini_bar, lv_obj_get_width(lv_event_get_target_obj(e)));
 }
 
 static void build_mini(lv_obj_t *root)
@@ -1834,8 +1867,11 @@ static void build_mini(lv_obj_t *root)
     /* how far into the song, along the top edge */
     ui.mini_bar = lv_bar_create(m);
     lv_obj_set_floating(ui.mini_bar, true);
-    lv_obj_set_size(ui.mini_bar, LV_PCT(100), T5_DP(2));
+    /* edge to edge: a percentage would be of the content width, short of the
+     * right edge by the padding, so it follows the bar's full width instead */
+    lv_obj_set_size(ui.mini_bar, lv_obj_get_width(root), T5_DP(2));
     lv_obj_align(ui.mini_bar, LV_ALIGN_TOP_LEFT, -T5_DP(12), 0);
+    lv_obj_add_event_cb(m, mini_resized, LV_EVENT_SIZE_CHANGED, NULL);
     lv_obj_set_style_radius(ui.mini_bar, 0, 0);
     lv_obj_set_style_radius(ui.mini_bar, 0, LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(ui.mini_bar, md_color(sc()->c.on_surface), 0);
@@ -1910,8 +1946,8 @@ static void on_create(t5_app_t *app)
     ui.songs_count = md_label_create(head, "", MD_TYPE_BODY2);
     lv_obj_set_style_text_opa(ui.songs_count, sc()->on_surface.medium, 0);
     lv_obj_set_flex_grow(ui.songs_count, 1);
-    lv_obj_add_event_cb(md_button_create(head, "Shuffle", MD_BUTTON_TEXT), shuffle_all, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(md_button_create(head, "Rescan", MD_BUTTON_TEXT), rescan_clicked, LV_EVENT_CLICKED, NULL);
+    tab_button(head, "Shuffle", shuffle_all);
+    tab_button(head, "Rescan", rescan_clicked);
     make_list(p, &ui.songs, 0);
     add_notice(p, &ui.songs);
 
@@ -1928,7 +1964,7 @@ static void on_create(t5_app_t *app)
     lv_obj_t *spacer = lv_obj_create(head);
     lv_obj_remove_style_all(spacer);
     lv_obj_set_flex_grow(spacer, 1);
-    lv_obj_add_event_cb(md_button_create(head, "New playlist", MD_BUTTON_TEXT), new_playlist, LV_EVENT_CLICKED, NULL);
+    tab_button(head, "New playlist", new_playlist);
     make_list(p, &ui.playlists, 0);
     add_notice(p, &ui.playlists);
 

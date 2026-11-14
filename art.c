@@ -15,6 +15,7 @@ void lv_image_cache_drop(const void *src);
 #define PENDING_MAX 48
 #define JPEG_MAX (4 * 1024 * 1024)
 #define WORK_BYTES 8192
+#define READ_SLICE (32 * 1024)
 
 typedef struct {
     bool used;
@@ -80,7 +81,14 @@ static uint8_t *read_range(const char *path, uint32_t off, uint32_t len)
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
     uint8_t *b = malloc(len);
-    bool ok = b && live() && fseek(f, (long)off, SEEK_SET) == 0 && live() && fread(b, 1, len, f) == len;
+    bool ok = b && live() && fseek(f, (long)off, SEEK_SET) == 0;
+    /* in slices: one big read holds the card's file lock for its whole length,
+     * and the player's reads wait behind it long enough to run its stream dry */
+    for (uint32_t at = 0; ok && at < len;) {
+        uint32_t n = len - at < READ_SLICE ? len - at : READ_SLICE;
+        ok = live() && fread(b + at, 1, n, f) == n;
+        at += n;
+    }
     if (live()) fclose(f);                             /* exiting: the OS closes it */
     if (!ok) {
         free(b);

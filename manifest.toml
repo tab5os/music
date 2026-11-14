@@ -1,6 +1,6 @@
 id = "com.t5.example.music"
 name = "Music"
-version = "2.0.1"
+version = "2.0.2"
 api = 1
 runtime = "native"
 entry = "app.elf"
